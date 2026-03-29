@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+logs/*.log
+
+# Generated output
+*.png
+equity_curve.png
+cs_momentum_equity.png
+
+# Environment
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# SQLite
+*.db
+*.sqlite
