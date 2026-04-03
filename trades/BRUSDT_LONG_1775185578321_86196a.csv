@@ -1,0 +1,4 @@
+ts,secs_from_entry,event_type,price,lc_state,aligned_score,velocity,cur_ret,peak_pnl,drawdown,exit_reason,extra
+1775185578.322,0.0,entry,0.15045,,0.0,0.0,0.0,0.0,0.0,,score=+2.347 vol=0.2000%
+1775185582.211,3.9,trailing_armed,0.15106,BUILD,0.0,0.0,0.00405,0.0,0.0,,
+1775185607.103,28.8,exit,0.15108,BUILD,2.3466,0.0,0.00419,0.0,0.00159,strategy_stop,

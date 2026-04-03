@@ -1,0 +1,4 @@
+ts,secs_from_entry,event_type,price,lc_state,aligned_score,velocity,cur_ret,peak_pnl,drawdown,exit_reason,extra
+1775194419.246,0.0,entry,0.03732,,0.0,0.0,0.0,0.0,0.0,,score=+2.312 vol=0.2000%
+1775194423.796,4.6,rank_snapshot,0.03694,BUILD,2.312,0.0,0.0,0.0,0.0,,"{'confidence': 1.0, 'sl_dist': 0.01, 'exit_trigger': 'dynamic_vol_stop'}"
+1775194424.274,5.0,exit,0.03694,BUILD,2.312,0.0,-0.01018,0.0,0.0123,dynamic_vol_stop,

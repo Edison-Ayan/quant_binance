@@ -60,6 +60,24 @@ class EventType(Enum):
     # 消费者：高频策略（计算 OFI、盘口压力等微观结构指标）
     ORDER_BOOK = "ORDER_BOOK"
 
+    # ── 决策层事件（终极版新增）──────────────────────────────────────────────
+
+    # 融合 alpha 更新：AlphaFusionEngine 每次 rank 后发出
+    # 携带 {symbol: FusedAlpha} 快照，供监控/归因模块使用
+    ALPHA_UPDATE = "ALPHA_UPDATE"
+
+    # 目标组合更新：PortfolioConstructor 输出的 TargetPortfolio
+    # 携带 {longs, shorts, to_close_long, to_close_short}
+    TARGET_POSITION = "TARGET_POSITION"
+
+    # ── 风控事件（终极版新增）────────────────────────────────────────────────
+
+    # 风控拒绝通知：RiskManager 拒绝 SIGNAL 时发出，携带 reject_reason
+    RISK_REJECT = "RISK_REJECT"
+
+    # Kill Switch 触发通知：ShockDetector 触发全局暂停时发出
+    KILL_SWITCH = "KILL_SWITCH"
+
 
 # ── Binance 端点常量 ──────────────────────────────────────────────────────────
 class BinanceEndpoints:

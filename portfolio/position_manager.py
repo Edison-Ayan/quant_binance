@@ -57,6 +57,18 @@ class Position:
         # 每次收到 TICK 事件时由 PositionManager.on_tick() 更新
         self.unrealized_pnl = 0.0
 
+        # ── Alpha 生命周期追踪字段 ─────────────────────────────────────────────
+        # 当前 Alpha 生命周期状态（BUILD / EXPANSION / DECAY / REVERSAL）
+        self.alpha_state: str = ""
+        # 建仓时的 unified alpha 分数（用于事后归因）
+        self.entry_alpha: float = 0.0
+        # 持仓期间观测到的峰值 unified alpha
+        self.peak_alpha: float = 0.0
+        # 持仓原因标签（strategy_open / lifecycle_reversal 等）
+        self.holding_reason: str = ""
+        # 最近一次生命周期状态更新的时间戳（time.time()）
+        self.last_lifecycle_update: float = 0.0
+
     def update(self, qty, price):
         """
         根据成交信息更新持仓状态。

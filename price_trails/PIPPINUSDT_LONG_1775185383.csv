@@ -1,0 +1,4 @@
+# symbol=PIPPINUSDT,side=LONG,entry_price=0.06359,exit_price=0.06346,exit_reason=vol_stop,sl_price=0.06346281999999999,tp_price=0.06454384999999999,leverage=10
+ts,seconds,price,ret_margin_pct
+1775185383.772,0.0,0.06359,0.0
+1775185384.208,0.4,0.06346,-2.0443

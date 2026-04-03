@@ -120,6 +120,196 @@ class Database:
                 )
                 """
             )
+
+            # ── 终极版新增表 ──────────────────────────────────────────────────
+
+            # 持仓 alpha 生命周期变化记录
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS lifecycle_log (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts         INTEGER NOT NULL,
+                    symbol     TEXT    NOT NULL,
+                    side       TEXT    NOT NULL,
+                    old_state  TEXT,
+                    new_state  TEXT    NOT NULL,
+                    score      REAL,
+                    velocity   REAL
+                )
+                """
+            )
+
+            # 全市场状态快照
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_state_log (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts           INTEGER NOT NULL,
+                    regime       TEXT    NOT NULL,
+                    dispersion   REAL,
+                    tradability  REAL,
+                    crowding_z   REAL,
+                    is_tradeable INTEGER,
+                    symbol_count INTEGER
+                )
+                """
+            )
+
+            # 融合 alpha 快照（每次 rank 后记录最强候选）
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alpha_fusion_log (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts               INTEGER NOT NULL,
+                    symbol           TEXT    NOT NULL,
+                    unified          REAL,
+                    slow_score       REAL,
+                    fast_boost       REAL,
+                    regime_mult      REAL,
+                    tradability_mult REAL,
+                    crowding_disc    REAL
+                )
+                """
+            )
+
+            # 成本模型拒绝记录
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cost_reject_log (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts             INTEGER NOT NULL,
+                    symbol         TEXT    NOT NULL,
+                    side           TEXT,
+                    notional       REAL,
+                    total_cost     REAL,
+                    expected_gross REAL,
+                    reject_reason  TEXT
+                )
+                """
+            )
+
+            # 风控拒绝记录
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS risk_reject_log (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts            INTEGER NOT NULL,
+                    symbol        TEXT    NOT NULL,
+                    side          TEXT,
+                    reject_layer  TEXT,
+                    reject_reason TEXT
+                )
+                """
+            )
+
+            # 目标组合决策记录（每次慢层排名后）
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portfolio_decision_log (
+                    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts                  INTEGER NOT NULL,
+                    n_longs             INTEGER,
+                    n_shorts            INTEGER,
+                    net_exposure        REAL,
+                    to_close_long_cnt   INTEGER,
+                    to_close_short_cnt  INTEGER
+                )
+                """
+            )
+
+            # 开仓决策快照（开仓时所有信号值）
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entry_snapshot (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts               INTEGER NOT NULL,
+                    symbol           TEXT    NOT NULL,
+                    side             TEXT    NOT NULL,
+                    entry_price      REAL,
+                    qty              REAL,
+                    notional         REAL,
+                    slow_score       REAL,
+                    unified_alpha    REAL,
+                    timing_score     REAL,
+                    fast_boost       REAL,
+                    regime           TEXT,
+                    tradability      REAL,
+                    dispersion       REAL,
+                    volume_zscore    REAL,
+                    oi_change_pct    REAL,
+                    ret_1m           REAL,
+                    ret_5m           REAL,
+                    funding_rate     REAL,
+                    spread_bps       REAL,
+                    best_depth_usdt  REAL,
+                    hf_ofi           REAL,
+                    hf_lob_pc1       REAL,
+                    hf_lob_z1        REAL,
+                    hf_lob_z2        REAL,
+                    fee_cost         REAL,
+                    spread_cost      REAL,
+                    impact_cost      REAL,
+                    total_cost       REAL,
+                    expected_gross   REAL,
+                    cost_ratio       REAL,
+                    size_scale       REAL
+                )
+                """
+            )
+
+            # 平仓决策快照（平仓时的状态）
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS exit_snapshot (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts                    INTEGER NOT NULL,
+                    symbol                TEXT    NOT NULL,
+                    side                  TEXT    NOT NULL,
+                    exit_price            REAL,
+                    exit_reason           TEXT,
+                    slow_score            REAL,
+                    unified_alpha         REAL,
+                    timing_score          REAL,
+                    alpha_state           TEXT,
+                    entry_unified_alpha   REAL,
+                    peak_unified_alpha    REAL,
+                    velocity              REAL,
+                    drawdown_from_peak    REAL,
+                    mfe_pct               REAL,
+                    mae_pct               REAL,
+                    pnl_usdt              REAL,
+                    ret_lev_pct           REAL,
+                    hold_seconds          REAL,
+                    stop_loss_price       REAL,
+                    flip_confirm_secs     REAL
+                )
+                """
+            )
+
+            # 持仓时间序列（每 5s 一条）
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS position_timeseries (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts               INTEGER NOT NULL,
+                    symbol           TEXT    NOT NULL,
+                    side             TEXT    NOT NULL,
+                    price            REAL,
+                    unrealized_pnl   REAL,
+                    ret_pct          REAL,
+                    slow_score       REAL,
+                    unified_alpha    REAL,
+                    timing_score     REAL,
+                    hf_ofi           REAL,
+                    hf_lob_pc1       REAL,
+                    hf_lob_z1        REAL,
+                    spread_bps       REAL,
+                    alpha_state      TEXT,
+                    hold_seconds     REAL
+                )
+                """
+            )
+
             self.conn.commit()
 
     # -------------------------
@@ -144,6 +334,61 @@ class Database:
                 " pnl_usdt, ret_pct, ret_lev_pct, hold_seconds, reason, "
                 " entry_time, exit_time) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
+            # 终极版新增表
+            "lifecycle_log": (
+                "INSERT INTO lifecycle_log "
+                "(ts, symbol, side, old_state, new_state, score, velocity) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ),
+            "market_state_log": (
+                "INSERT INTO market_state_log "
+                "(ts, regime, dispersion, tradability, crowding_z, is_tradeable, symbol_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ),
+            "alpha_fusion_log": (
+                "INSERT INTO alpha_fusion_log "
+                "(ts, symbol, unified, slow_score, fast_boost, regime_mult, tradability_mult, crowding_disc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
+            "cost_reject_log": (
+                "INSERT INTO cost_reject_log "
+                "(ts, symbol, side, notional, total_cost, expected_gross, reject_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)"
+            ),
+            "risk_reject_log": (
+                "INSERT INTO risk_reject_log "
+                "(ts, symbol, side, reject_layer, reject_reason) "
+                "VALUES (?, ?, ?, ?, ?)"
+            ),
+            "portfolio_decision_log": (
+                "INSERT INTO portfolio_decision_log "
+                "(ts, n_longs, n_shorts, net_exposure, to_close_long_cnt, to_close_short_cnt) "
+                "VALUES (?, ?, ?, ?, ?, ?)"
+            ),
+            "entry_snapshot": (
+                "INSERT INTO entry_snapshot "
+                "(ts, symbol, side, entry_price, qty, notional, slow_score, unified_alpha, "
+                "timing_score, fast_boost, regime, tradability, dispersion, volume_zscore, "
+                "oi_change_pct, ret_1m, ret_5m, funding_rate, spread_bps, best_depth_usdt, "
+                "hf_ofi, hf_lob_pc1, hf_lob_z1, hf_lob_z2, fee_cost, spread_cost, "
+                "impact_cost, total_cost, expected_gross, cost_ratio, size_scale) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
+            "exit_snapshot": (
+                "INSERT INTO exit_snapshot "
+                "(ts, symbol, side, exit_price, exit_reason, slow_score, unified_alpha, "
+                "timing_score, alpha_state, entry_unified_alpha, peak_unified_alpha, velocity, "
+                "drawdown_from_peak, mfe_pct, mae_pct, pnl_usdt, ret_lev_pct, hold_seconds, "
+                "stop_loss_price, flip_confirm_secs) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            ),
+            "position_timeseries": (
+                "INSERT INTO position_timeseries "
+                "(ts, symbol, side, price, unrealized_pnl, ret_pct, slow_score, unified_alpha, "
+                "timing_score, hf_ofi, hf_lob_pc1, hf_lob_z1, spread_bps, alpha_state, hold_seconds) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             ),
         }
         while True:
@@ -210,6 +455,59 @@ class Database:
             trade.reason,
             int(trade.entry_time * 1000),
             int(trade.exit_time  * 1000),
+        )))
+
+    # ── 终极版新增写入接口 ────────────────────────────────────────────────────
+
+    def save_lifecycle_event(
+        self, symbol: str, side: str, old_state: str, new_state: str,
+        score: float = 0.0, velocity: float = 0.0
+    ):
+        self._write_queue.put(("lifecycle_log", (
+            int(time.time() * 1000), symbol, side, old_state, new_state,
+            score, velocity,
+        )))
+
+    def save_market_state(
+        self, regime: str, dispersion: float, tradability: float,
+        crowding_z: float, is_tradeable: bool, symbol_count: int
+    ):
+        self._write_queue.put(("market_state_log", (
+            int(time.time() * 1000), regime, dispersion, tradability,
+            crowding_z, int(is_tradeable), symbol_count,
+        )))
+
+    def save_alpha_fusion(self, symbol: str, fa) -> None:
+        """fa: FusedAlpha dataclass"""
+        self._write_queue.put(("alpha_fusion_log", (
+            int(time.time() * 1000), symbol,
+            fa.unified, fa.slow_score, fa.fast_boost_val,
+            fa.regime_mult, fa.tradability_mult, fa.crowding_disc,
+        )))
+
+    def save_cost_reject(
+        self, symbol: str, side: str, notional: float,
+        total_cost: float, expected_gross: float, reason: str
+    ):
+        self._write_queue.put(("cost_reject_log", (
+            int(time.time() * 1000), symbol, side,
+            notional, total_cost, expected_gross, reason,
+        )))
+
+    def save_risk_reject(
+        self, symbol: str, side: str, layer: str, reason: str = ""
+    ):
+        self._write_queue.put(("risk_reject_log", (
+            int(time.time() * 1000), symbol, side, layer, reason,
+        )))
+
+    def save_portfolio_decision(
+        self, n_longs: int, n_shorts: int, net_exposure: float,
+        to_close_long: int, to_close_short: int
+    ):
+        self._write_queue.put(("portfolio_decision_log", (
+            int(time.time() * 1000), n_longs, n_shorts,
+            net_exposure, to_close_long, to_close_short,
         )))
 
     def close(self):

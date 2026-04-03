@@ -323,6 +323,10 @@ class LOBManifoldEngine:
     def get_symbol_latent(self, symbol: str) -> Optional[np.ndarray]:
         return self._lob_latent.get(symbol)
 
+    def get_symbol_pc1(self, symbol: str) -> float:
+        """返回单个品种的白化 PC1 分数（EMA 平滑后），未就绪时返回 0.0。"""
+        return self._pc1_scores.get(symbol, 0.0)
+
     def get_all_latents(self) -> Dict[str, np.ndarray]:
         return dict(self._lob_latent)
 

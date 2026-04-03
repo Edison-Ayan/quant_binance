@@ -1,0 +1,4 @@
+# symbol=CYSUSDT,side=SHORT,entry_price=0.2471,exit_price=0.2476,exit_reason=vol_stop,sl_price=0.2475942,tp_price=0.24339349999999998,leverage=10
+ts,seconds,price,ret_margin_pct
+1775185423.49,0.0,0.2471,0.0
+1775185423.954,0.5,0.2476,-2.0235

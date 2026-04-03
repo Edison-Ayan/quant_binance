@@ -1,0 +1,4 @@
+# symbol=CHRUSDT,side=LONG,entry_price=0.0203,exit_price=0.0202,exit_reason=vol_stop,sl_price=0.020259399999999997,tp_price=0.020604499999999998,leverage=10
+ts,seconds,price,ret_margin_pct
+1775185260.785,0.0,0.0203,0.0
+1775185261.232,0.4,0.0202,-4.9261

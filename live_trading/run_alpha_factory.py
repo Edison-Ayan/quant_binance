@@ -51,6 +51,7 @@ from data_layer.rest_fetcher import RestFetcher
 
 from alpha_factory.universe_filter import UniverseFilter
 from alpha_factory.alpha_strategy import AlphaFactoryStrategy
+from monitor.report_engine import ReportEngine
 
 
 # ── Paper Trading 模拟引擎 ────────────────────────────────────────────────────
@@ -121,12 +122,14 @@ class AlphaFactoryRunner:
     启动 → 运行 → 优雅停止
     """
 
-    def __init__(self, live: bool = False):
-        self.live         = live
-        self.event_engine = EventEngine()
-        self.strategy:    AlphaFactoryStrategy = None
-        self.ws_feed:     MultiSymbolFeed       = None
-        self.rest_fetcher: RestFetcher          = None
+    def __init__(self, live: bool = False, hold_forever: bool = False):
+        self.live           = live
+        self.hold_forever   = hold_forever
+        self.event_engine   = EventEngine()
+        self.strategy:      AlphaFactoryStrategy = None
+        self.ws_feed:       MultiSymbolFeed       = None
+        self.rest_fetcher:  RestFetcher           = None
+        self.report_engine: ReportEngine          = ReportEngine()
 
     # ─── WebSocket 回调（数据层 → 事件层）──────────────────────────────────────
 
@@ -212,6 +215,7 @@ class AlphaFactoryRunner:
                 "min_volume_zscore":    0.8,   # 成交量 Z-score 门槛
                 "warmup_count":          4,    # 热身期4次排序
                 "max_spread_bps":       20.0,  # 最大价差20bps
+                "hold_forever":         self.hold_forever,  # 不平仓模式
             },
         )
 
@@ -230,7 +234,9 @@ class AlphaFactoryRunner:
             on_depth       = self._on_depth,
         )
         self.ws_feed.start()
-        logger.info("✅ WebSocket 数据流已启动")
+        # 将 depth5 动态订阅函数注入策略（每轮排序后自动更新 TopN + 持仓的 depth）
+        self.strategy._depth_update_fn = self.ws_feed.update_depth_symbols
+        logger.info("✅ WebSocket 数据流已启动（depth5 动态订阅已挂载）")
 
         # ── 7. 启动 REST 轮询（资金费率 + OI）──────────────────────────────────
         self.rest_fetcher = RestFetcher(
@@ -255,7 +261,7 @@ class AlphaFactoryRunner:
                 self._print_status(execution_engine)
         except (KeyboardInterrupt, asyncio.CancelledError):
             logger.info("\n⏹ 收到停止信号，开始优雅关闭...")
-            self.stop(execution_engine)
+            self.stop(execution_engine, logger)
 
     def _print_status(self, execution_engine: PaperEngine):
         """每30秒打印一次系统状态"""
@@ -279,8 +285,17 @@ class AlphaFactoryRunner:
             f"──────────────────────────────────────────────────"
         )
 
-    def stop(self, execution_engine: PaperEngine = None):
-        """优雅停止所有组件"""
+        # 向 ReportEngine 记录市场状态快照
+        ms = getattr(self.strategy, "_latest_market_state", None)
+        if ms:
+            self.report_engine.record_market_state(
+                regime      = ms.regime.value,
+                tradability = ms.tradability,
+                dispersion  = ms.dispersion,
+            )
+
+    def stop(self, execution_engine: PaperEngine = None, log=None):
+        """优雅停止所有组件，生成终极版运行报告"""
         if self.strategy:
             self.strategy.on_stop()
         if self.ws_feed:
@@ -288,6 +303,12 @@ class AlphaFactoryRunner:
         if self.rest_fetcher:
             self.rest_fetcher.stop()
         self.event_engine.stop()
+
+        # 生成 session 级别运行报告
+        self.report_engine.generate(
+            strategy = self.strategy,
+            logger   = log,
+        )
 
         if execution_engine:
             summary = execution_engine.get_summary()
@@ -310,9 +331,15 @@ def main():
         default=False,
         help="启用实盘模式（默认为 Paper Trading）",
     )
+    parser.add_argument(
+        "--hold-forever",
+        action="store_true",
+        default=False,
+        help="买入后不平仓（禁用所有止损止盈，调试用）",
+    )
     args = parser.parse_args()
 
-    runner = AlphaFactoryRunner(live=args.live)
+    runner = AlphaFactoryRunner(live=args.live, hold_forever=args.hold_forever)
 
     # 注册 Ctrl+C 信号处理
     def handle_signal(signum, frame):

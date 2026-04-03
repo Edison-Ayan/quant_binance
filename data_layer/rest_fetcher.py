@@ -55,7 +55,7 @@ class RestFetcher:
     def __init__(
         self,
         symbols:    List[str],
-        on_update:  Callable[[str, float, float], None],   # (symbol, funding_rate, oi)
+        on_update:  Callable[[str, float, float, float], None],   # (symbol, funding_rate, oi, ret_24h)
         interval:   int = 60,
     ):
         """
@@ -123,13 +123,17 @@ class RestFetcher:
             # Step 2: 并发拉取各品种持仓量
             oi_map = self._fetch_open_interests()
 
-            # Step 3: 合并触发回调
+            # Step 3: 批量拉取24h涨跌幅（1次请求获取全市场）
+            ret24h_map = self._fetch_24h_changes()
+
+            # Step 4: 合并触发回调
             dispatched = 0
             for sym in self.symbols:
-                fr = funding_map.get(sym, 0.0)
-                oi = oi_map.get(sym, 0.0)
+                fr     = funding_map.get(sym, 0.0)
+                oi     = oi_map.get(sym, 0.0)
+                ret24h = ret24h_map.get(sym, 0.0)
                 try:
-                    self.on_update(sym, fr, oi)
+                    self.on_update(sym, fr, oi, ret24h)
                     dispatched += 1
                 except Exception as e:
                     logger.error(f"[RestFetcher] on_update 回调错误 {sym}: {e}")
@@ -162,6 +166,31 @@ class RestFetcher:
             }
         except Exception as e:
             logger.warning(f"[RestFetcher] 资金费率拉取失败: {e}")
+            return {}
+
+    def _fetch_24h_changes(self) -> dict:
+        """
+        批量拉取24小时涨跌幅。
+
+        接口：GET /fapi/v1/ticker/24hr
+        返回：{symbol: priceChangePercent/100}（转为小数，与 ret_1m/ret_5m 量纲一致）
+
+        1次请求即可获取全市场所有品种，效率高。
+        """
+        try:
+            resp = self._session.get(
+                f"{FAPI_BASE}/fapi/v1/ticker/24hr",
+                timeout=TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return {
+                item["symbol"]: float(item.get("priceChangePercent", 0) or 0) / 100.0
+                for item in data
+                if "symbol" in item
+            }
+        except Exception as e:
+            logger.warning(f"[RestFetcher] 24h涨跌幅拉取失败: {e}")
             return {}
 
     def _fetch_open_interests(self) -> dict:

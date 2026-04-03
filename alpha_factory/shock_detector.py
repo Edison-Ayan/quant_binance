@@ -37,14 +37,14 @@ PRICE_TS_WINDOW      = 60     # 价格序列窗口（用于 1s 跳动检测）
 SPREAD_ZSCORE_THRESH = 3.0    # spread Z-score 触发阈值
 TRADE_SIZE_MULT      = 5.0    # 单笔大单倍数阈值（相对均值）
 DEPTH_DROP_RATIO     = 0.50   # 深度骤降比例：低于均值 50% 触发
-PRICE_JUMP_1S        = 0.005  # 1 秒价格跳动阈值（0.5%）
+PRICE_JUMP_1S        = 0.010  # 1 秒价格跳动阈值（1.0%，加密货币 0.5% 过于灵敏）
 
 SHOCK_CONDS_REQUIRED = 2      # 同时满足几个条件才认定为冲击
 
 # Kill Switch 参数
 KILL_WINDOW_SEC      = 60     # 滑动窗口（秒）
 KILL_COUNT_THRESH    = 5      # 窗口内冲击次数触发 kill switch
-KILL_PAUSE_SEC       = 120    # kill switch 全局暂停时长（秒）
+KILL_PAUSE_SEC       = 60     # kill switch 全局暂停时长（秒，原 120s 占两个完整排名周期过长）
 SYMBOL_PAUSE_SEC     = 30     # 单品种冲击后暂停时长（秒）
 
 
@@ -144,7 +144,15 @@ class _SymbolState:
     # ── price 1s jump ─────────────────────────────────────────────────────────
 
     def update_price(self, price: float, ts: float) -> Optional[float]:
-        """返回过去 1 秒内的价格跳动幅度（None = 数据不足）"""
+        """返回过去 1 秒内的价格跳动幅度（None = 数据不足）
+
+        断线重连保护：若当前时间戳与上一条记录间隔 > 5 秒，说明 WS 发生过断线，
+        丢弃所有历史价格数据，避免用断线前的旧价格比较产生虚假跳动检测。
+        """
+        # 断线缺口检测：时间戳跳变 > 5s → 清空历史（WS 重连场景）
+        if self._price_ts and ts - self._price_ts[-1][0] > 5.0:
+            self._price_ts.clear()
+
         self._price_ts.append((ts, price))
 
         target_ts = ts - 1.0

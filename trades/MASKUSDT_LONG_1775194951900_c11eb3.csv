@@ -1,0 +1,21 @@
+ts,secs_from_entry,event_type,price,lc_state,aligned_score,velocity,cur_ret,peak_pnl,drawdown,exit_reason,extra
+1775194951.901,0.0,entry,0.4577,,0.0,0.0,0.0,0.0,0.0,,score=+1.593 vol=0.2000%
+1775194997.689,45.8,rank_snapshot,0.4577,REVERSAL,-0.4528,-0.51131,0.0,0.0,0.0,,unified=-0.453 held=46s
+1775194997.689,45.8,lifecycle_change,0.4577,REVERSAL,-0.4528,-0.51131,0.0,0.0,0.0,,BUILD->REVERSAL
+1775195058.395,106.5,rank_snapshot,0.4568,REVERSAL,-0.287,-0.34205,0.0,0.0,0.0,,unified=-0.287 held=106s
+1775195118.62,166.7,rank_snapshot,0.4578,BUILD,1.5541,0.20373,0.0,0.0,0.0,,unified=+1.554 held=167s
+1775195118.62,166.7,lifecycle_change,0.4578,BUILD,1.5541,0.20373,0.00022,0.0,0.0,,REVERSAL->BUILD
+1775195179.382,227.5,rank_snapshot,0.4569,BUILD,0.7302,-0.05317,0.0,0.0,0.0,,unified=+0.730 held=227s
+1775195240.057,288.2,rank_snapshot,0.4567,EXPANSION,0.9405,0.01269,0.0,0.0,0.0,,unified=+0.940 held=288s
+1775195240.058,288.2,lifecycle_change,0.4567,EXPANSION,0.9405,0.01269,-0.00218,0.0,0.0,,BUILD->EXPANSION
+1775195300.719,348.8,rank_snapshot,0.4563,EXPANSION,0.2419,-0.16513,0.0,0.0,0.0,,unified=+0.242 held=349s
+1775195361.391,409.5,rank_snapshot,0.4581,DECAY,0.5953,-0.0355,0.0,0.0,0.0,,unified=+0.595 held=409s
+1775195361.391,409.5,lifecycle_change,0.4581,DECAY,0.5953,-0.0355,0.00087,0.0,0.0,,EXPANSION->DECAY
+1775195422.026,470.1,rank_snapshot,0.4569,DECAY,0.5364,-0.04135,0.0,0.0,0.0,,unified=+0.536 held=470s
+1775195483.235,531.3,rank_snapshot,0.4576,DECAY,0.8539,0.04837,0.0,0.0,0.0,,unified=+0.854 held=531s
+1775195542.985,591.1,rank_snapshot,0.4571,DECAY,0.1608,-0.13701,0.0,0.0,0.0,,unified=+0.161 held=591s
+1775195603.165,651.3,rank_snapshot,0.4578,DECAY,1.5495,0.24444,0.0,0.0,0.0,,unified=+1.550 held=651s
+1775195663.884,712.0,rank_snapshot,0.458,DECAY,0.6826,-0.0334,0.0,0.0,0.0,,unified=+0.683 held=712s
+1775195724.572,772.7,rank_snapshot,0.4572,REVERSAL,-0.3738,-0.28915,0.0,0.0,0.0,,unified=-0.374 held=773s
+1775195724.572,772.7,lifecycle_change,0.4572,REVERSAL,-0.3738,-0.28915,-0.00109,0.0,0.0,,DECAY->REVERSAL
+1775195725.06,773.2,exit,0.4572,REVERSAL,-0.3738,-0.28915,-0.00109,0.0,0.00284,lifecycle_reversal,

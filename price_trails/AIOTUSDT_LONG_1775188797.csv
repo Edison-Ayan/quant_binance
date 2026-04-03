@@ -1,0 +1,5 @@
+# symbol=AIOTUSDT,side=LONG,entry_price=0.05044,exit_price=0.04943,exit_reason=vol_stop,sl_price=0.049431199999999995,tp_price=0.051196599999999995,leverage=10
+ts,seconds,price,ret_margin_pct
+1775188797.15,0.0,0.05044,0.0
+1775188798.196,1.0,0.0503,-2.7756
+1775188799.654,2.5,0.04943,-20.0238

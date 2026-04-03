@@ -1,0 +1,4 @@
+# symbol=STOUSDT,side=SHORT,entry_price=0.18653,exit_price=0.18691,exit_reason=vol_stop,sl_price=0.18690306,tp_price=0.18373205,leverage=10
+ts,seconds,price,ret_margin_pct
+1775185317.826,0.0,0.18653,0.0
+1775185318.438,0.6,0.18691,-2.0372

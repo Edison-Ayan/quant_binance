@@ -1,0 +1,6 @@
+# symbol=APRUSDT,side=LONG,entry_price=0.18976,exit_price=0.18963,exit_reason=strategy_stop,sl_price=0.18748288000000002,tp_price=0.19260639999999998,leverage=10
+ts,seconds,price,ret_margin_pct
+1775199180.998,0.0,0.18976,0.0
+1775199182.142,1.1,0.18946,-1.5809
+1775199183.188,2.2,0.18963,-0.6851
+1775199183.644,2.6,0.18963,-0.6851

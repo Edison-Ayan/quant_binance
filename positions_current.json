@@ -1,0 +1,72 @@
+{
+  "ts": 1775205485.3244019,
+  "long": [
+    {
+      "symbol": "ORDIUSDT",
+      "entry_price": 2.38,
+      "score": 2.01870397762388,
+      "ret_lev_pct": -3.36,
+      "held_s": 360.0
+    },
+    {
+      "symbol": "1000BONKUSDT",
+      "entry_price": 0.005819,
+      "score": 1.4040089690487716,
+      "ret_lev_pct": 0.52,
+      "held_s": 239.0
+    },
+    {
+      "symbol": "HEIUSDT",
+      "entry_price": 0.08323,
+      "score": -1.037259974354764,
+      "ret_lev_pct": 0.36,
+      "held_s": 102.0
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "entry_price": 0.1199,
+      "score": -1.3044588884575095,
+      "ret_lev_pct": -1.67,
+      "held_s": 100.0
+    },
+    {
+      "symbol": "VETUSDT",
+      "entry_price": 0.00699,
+      "score": -0.8472551325866725,
+      "ret_lev_pct": 0.57,
+      "held_s": 58.0
+    }
+  ],
+  "short": [
+    {
+      "symbol": "YBUSDT",
+      "entry_price": 0.1492,
+      "score": 2.1686277202589204,
+      "ret_lev_pct": 21.45,
+      "held_s": 122.0
+    },
+    {
+      "symbol": "CUSDT",
+      "entry_price": 0.07031,
+      "score": 1.1106220664523587,
+      "ret_lev_pct": 5.4,
+      "held_s": 99.0
+    },
+    {
+      "symbol": "ONGUSDT",
+      "entry_price": 0.09051,
+      "score": -1.8016240379652946,
+      "ret_lev_pct": -6.63,
+      "held_s": 57.0
+    }
+  ],
+  "net_exposure": 27.12,
+  "weights": {
+    "volume_zscore": 0.25,
+    "oi_change_pct": 0.2,
+    "ret_1m": 0.05,
+    "ret_5m": 0.15,
+    "funding_rate": 0.3,
+    "ret_24h": 0.05
+  }
+}

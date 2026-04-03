@@ -1,143 +1,136 @@
 """
-监控引擎（MonitorEngine）
+监控引擎（MonitorEngine）- 终极版
 
-职责：
-    定时打印当前所有持仓的状态快照（数量、入场均价、浮动盈亏），
-    为运维人员提供实时的账户状况可视化。
+定时打印：
+    原有：持仓 qty / entry / unrealized_pnl
+    新增：unified alpha / lifecycle 状态 / market state / 成本过滤 / 风控拒绝统计
 
-设计思路：
-    使用 threading.Timer 而不是 time.sleep() 循环的原因：
-    - sleep() 循环会永久阻塞一个线程，且停止时不够干净
-    - Timer 是一次性定时器，触发后自动结束。通过在回调中重新创建 Timer，
-      实现"自我调度"的周期性执行
-    - stop() 方法可以通过取消 Timer 立即停止，非常干净，无需等待 sleep 结束
+依然使用 threading.Timer 自调度模式（理由见原版注释）。
 
-    Timer 线程设为 daemon=True，确保主程序退出时自动销毁，
-    无需显式 join，适合不影响主流程生命周期的辅助任务。
-
-在系统中的位置：
-    main.py 启动后独立运行，不接入事件引擎，
-    直接读取 PositionManager.positions 字典（只读，无需加锁）。
+可选注入策略引用（strategy）：
+    - 若传入 AlphaFactoryStrategy，则可显示 unified alpha、lifecycle、market state
+    - 不传入时退化为原版只显示 PositionManager 数据（向后兼容）
 """
 
 import threading
+import time
 
 
 class MonitorEngine:
     """
-    持仓状态定时监控引擎。
+    持仓状态定时监控引擎（终极版）。
 
-    每隔指定时间打印一次当前所有持仓的快照，方便实时监控账户状况。
+    新参数：
+        strategy (optional) : AlphaFactoryStrategy 实例，提供高层状态
+        report_engine (optional) : ReportEngine 实例，提供过滤/拒绝统计
     """
 
-    def __init__(self, position_manager, interval: int = 30):
-        """
-        初始化监控引擎。
-
-        参数：
-            position_manager : PositionManager 实例，从中读取持仓状态
-            interval (int)   : 打印间隔（秒），默认 30 秒
-                               间隔越短，监控越实时，但终端输出越密集
-        """
-        # 持仓管理器引用，只读方式访问 positions 字典
+    def __init__(
+        self,
+        position_manager,
+        interval: int = 30,
+        strategy=None,
+        report_engine=None,
+    ):
         self.position_manager = position_manager
-
-        # 定时打印间隔（秒）
-        self.interval = interval
-
-        # 当前 Timer 对象引用，用于 stop() 时取消定时器
+        self.interval         = interval
+        self.strategy         = strategy        # 可选注入
+        self.report_engine    = report_engine   # 可选注入
         self._timer: threading.Timer = None
 
-    # -------------------------
-    # 生命周期管理
-    # -------------------------
+    # ─── 生命周期 ─────────────────────────────────────────────────────────────
 
     def start(self):
-        """
-        启动定时监控。
-
-        立即执行一次打印（_schedule 内部先调用 print_status），
-        然后设定下次触发时间。这样启动后不必等待一个完整的 interval 就能看到状态。
-        """
         self._schedule()
 
     def stop(self):
-        """
-        停止定时监控。
-
-        取消尚未触发的 Timer，确保在系统关闭时不再有新的打印输出，
-        也避免因 Timer 持有 position_manager 引用而阻止垃圾回收。
-        """
         if self._timer is not None:
             self._timer.cancel()
             self._timer = None
 
-    # -------------------------
-    # 自我调度逻辑
-    # -------------------------
+    # ─── 自调度 ───────────────────────────────────────────────────────────────
 
     def _schedule(self):
-        """
-        执行一次状态打印，然后安排下一次调度。
-
-        自我调度模式：
-            _schedule() 先执行业务逻辑（print_status），
-            再创建一个新的 Timer 指向自身（self._schedule），
-            从而实现周期性循环，直到 stop() 被调用取消 Timer。
-
-        为什么不用 while + sleep 循环？
-            Timer 方式更灵活：stop() 可以立即取消而不必等待 sleep 结束，
-            且不会阻塞专用线程（Timer 用完即释放，下次重新创建）。
-        """
-        # 先执行状态打印
         self.print_status()
-
-        # 创建新的一次性 Timer，interval 秒后再次调用 _schedule
         self._timer = threading.Timer(self.interval, self._schedule)
-
-        # 设为守护线程：主程序退出时 Timer 自动销毁，无需手动清理
         self._timer.daemon = True
-
-        # 启动定时器（非阻塞，Timer 在后台独立线程中等待）
         self._timer.start()
 
-    # -------------------------
-    # 状态打印
-    # -------------------------
+    # ─── 状态打印 ─────────────────────────────────────────────────────────────
 
     def print_status(self):
-        """
-        打印当前所有持仓的状态快照。
+        sep = "-" * 62
+        print(sep)
+        print(f"[Monitor] {time.strftime('%H:%M:%S')}  持仓快照")
+        print(sep)
 
-        格式化输出各品种的持仓数量（qty）、入场均价（entry）和浮动盈亏（pnl），
-        方便运维人员快速了解账户整体状况。
-
-        跳过 qty == 0 的品种（曾有过成交但已完全平仓，无需显示）。
-        """
-        # 读取当前全部持仓（只读访问，事件引擎单线程写入，无并发冲突）
+        # ── 1. 持仓状态（PositionManager）────────────────────────────────────
         positions = self.position_manager.positions
+        active    = {s: p for s, p in positions.items() if p.qty != 0}
 
-        if not positions:
-            print("[Monitor] 当前无持仓")
-            return
+        if not active:
+            print("  无持仓")
+        else:
+            for symbol, pos in active.items():
+                # 从 strategy 获取 lifecycle 和 unified alpha（如果有）
+                lc_info     = ""
+                alpha_info  = ""
+                if self.strategy:
+                    lc = self.strategy.lifecycle_tracker.get_lifecycle(symbol, "LONG") \
+                         or self.strategy.lifecycle_tracker.get_lifecycle(symbol, "SHORT")
+                    if lc:
+                        lc_info = f"  [{lc.state.value:<10}]"
+                    fa = self.strategy._latest_fused_alphas.get(symbol)
+                    if fa:
+                        alpha_info = f"  α={fa.unified:+.3f}"
 
-        print("-" * 40)
-        print(f"[Monitor] 持仓状态（共 {len(positions)} 个品种）")
-        print("-" * 40)
+                print(
+                    f"  {symbol:<12} "
+                    f"qty={pos.qty:>10.4f}  "
+                    f"entry={pos.entry_price:>12.4f}  "
+                    f"pnl={pos.unrealized_pnl:>+10.4f}"
+                    f"{lc_info}{alpha_info}"
+                )
 
-        for symbol, pos in positions.items():
-
-            # 跳过已平仓品种（qty == 0 表示无持仓，无需显示）
-            if pos.qty == 0:
-                continue
-
-            # 格式化输出：品种名、持仓量、入场均价、浮动盈亏
-            # pnl 前加 + 号（{:+.4f}），正负一目了然
+        # ── 2. 市场状态（MarketStateEngine）──────────────────────────────────
+        if self.strategy and self.strategy._latest_market_state:
+            ms = self.strategy._latest_market_state
+            print(sep)
             print(
-                f"  {symbol:<12} "          # 品种名，左对齐 12 字符
-                f"qty={pos.qty:>10.4f}  "   # 持仓量，右对齐 10 字符，4 位小数
-                f"entry={pos.entry_price:>12.4f}  "   # 入场均价
-                f"pnl={pos.unrealized_pnl:>+12.4f}"  # 浮盈亏（带正负号）
+                f"  [市场状态] "
+                f"regime={ms.regime.value:<16} "
+                f"tradability={ms.tradability:.3f}  "
+                f"dispersion={ms.dispersion:.5f}  "
+                f"crowding_z={ms.crowding_score:+.2f}  "
+                f"tradeable={'✓' if ms.is_tradeable else '✗'}"
             )
 
-        print("-" * 40)
+        # ── 3. 候选池摘要 ─────────────────────────────────────────────────────
+        if self.strategy and hasattr(self.strategy, "_candidate_pool"):
+            pool  = self.strategy._candidate_pool
+            longs = list(pool.get("long",  set()))[:5]
+            shorts= list(pool.get("short", set()))[:5]
+            print(
+                f"  [候选池]   "
+                f"多头={longs}  "
+                f"空头={shorts}"
+            )
+
+        # ── 4. Lifecycle 分布（开放仓位）────────────────────────────────────
+        if self.strategy:
+            lc_status = self.strategy.lifecycle_tracker.get_all_status()
+            if lc_status:
+                from collections import Counter
+                state_dist = Counter(v["state"] for v in lc_status.values())
+                print(
+                    f"  [生命周期] "
+                    + "  ".join(f"{s}:{n}" for s, n in state_dist.items())
+                )
+
+        # ── 5. 成本过滤 / 风控统计（ReportEngine）────────────────────────────
+        if self.report_engine:
+            cost_n = len(self.report_engine._cost_rejects)
+            risk_n = len(self.report_engine._risk_rejects)
+            print(f"  [过滤统计] 成本拒绝={cost_n}次  风控拒绝={risk_n}次")
+
+        print(sep)

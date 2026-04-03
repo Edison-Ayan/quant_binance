@@ -1,41 +1,55 @@
 """
-Multi-Symbol WebSocket Feed - 多币种实时数据订阅
+Multi-Symbol WebSocket Feed - 三通道分片并行版
 
-职责：
-    使用 Binance Futures Combined Stream 同时订阅多个交易对的实时数据，
-    比单独连接每个品种效率高得多（一个连接 = 200个流）。
+架构：
+    WS 线程（JSON 解析 + 分流）
+        ├── trade_queues[N]   → N 个 trade 工作线程（按 symbol hash 分片）
+        ├── _book_state[sym]  → book 消费线程（state-flow：覆盖最新值，无积压）
+        └── _depth_state[sym] → depth 消费线程（state-flow：覆盖最新值，无积压）
 
-订阅的流类型：
-    {symbol}@aggTrade       : 聚合成交（价格、数量、方向）
-                              → 驱动 FeatureEngine.on_trade()
-    {symbol}@bookTicker     : 最优买卖价快照（bid/ask + 数量）
-                              → 驱动 FeatureEngine.on_book_ticker()
-    {symbol}@depth5@100ms   : Top-5 档订单簿快照（100ms 间隔，完整快照非增量）
-                              → 驱动 LOBManifoldEngine.on_order_book()（可选）
+核心改进：
 
-Combined Stream URL 格式：
-    wss://fstream.binance.com/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/...
+    1. 三通道分离
+       aggTrade / bookTicker / depth5 完全独立处理，互不阻塞
 
-数据量估算（参考）：
-    80 个品种 × 2 种流 = 160 个流
-    aggTrade: ~10-100 条/秒（主流币更频繁）
-    bookTicker: ~1-10 条/秒
+    2. 状态流优化（State-Flow）
+       bookTicker / depth5：只保存最新值（覆盖旧值），消费线程按 5ms 轮询
+       aggTrade：保持事件流（不覆盖），必须每条处理
 
-Binance 限制：
-    每个 WebSocket 连接最多 200 个流
-    → 60 品种 × 2 流 = 120 流（无 depth）
-    → 60 品种 × 3 流 = 180 流（含 depth5），仍在 200 上限内
+    3. 分片并行（Symbol Sharding）
+       worker_id = hash(symbol) % TRADE_WORKERS
+       同 symbol 有序；不同 symbol 并行处理
 
-自动重连：
-    断线后自动在 RECONNECT_DELAY 秒后重连，保证数据连续性。
+    4. depth 动态订阅
+       初始不订阅任何 depth5；调用 update_depth_symbols() 后动态增减
+       只对「当前持仓 + TopN/BottomN + 候选池」开启，节省带宽
+
+    5. 优先级控制
+       trade > book > depth
+       trade 队列满时丢弃最旧的一条；book/depth 状态流天然无积压
+
+    6. 指数退避重连
+       delay = min(BASE × 2^retry, MAX_DELAY=30s)
+       连接稳定 60s 后重置重连计数器
+
+    7. 实时监控统计
+       每 60s 打印：各连接 msg/s、各 trade 队列 backlog、drop 数、reconnect 数
+
+Binance Combined Stream 格式：
+    wss://fstream.binance.com/stream?streams=btcusdt@aggTrade/btcusdt@bookTicker/...
+    深度通过 SUBSCRIBE 消息动态添加：
+    {"method": "SUBSCRIBE", "params": ["btcusdt@depth5@100ms"], "id": 1}
 """
 
 import json
+import math
 import os
 import queue
 import time
 import threading
-from typing import List, Callable, Optional
+import collections
+from dataclasses import dataclass, field
+from typing import List, Callable, Optional, Set, Dict
 from urllib.parse import urlparse
 
 import websocket
@@ -43,15 +57,19 @@ import websocket
 from data_layer.logger import logger
 
 
-RECONNECT_DELAY    = 3    # 断线重连等待时间（秒）
-MAX_STREAMS_PER_WS = 200  # Binance 单连接流数上限
-SYMBOLS_PER_CONN   = 60   # 每个连接订阅的品种数（×2流=120，留40%余量）
-# 消息分发队列容量：WS 线程只做 JSON 解析和入队，业务回调在独立线程执行，
-# 避免回调慢时阻塞 WS recv 缓冲导致延迟积压。
-DISPATCH_QUEUE_SIZE = 20_000
+# ── 常量 ──────────────────────────────────────────────────────────────────────
+
+SYMBOLS_PER_CONN    = 40      # 每连接目标品种数（×2流=80，留 ~120 给 depth5 动态订阅）
+TRADE_WORKERS       = 4       # trade 分片并行工作线程数（建议 ≈ CPU核数/2）
+TRADE_QUEUE_SIZE    = 2_000   # 每个 trade shard 队列容量
+RECONNECT_BASE      = 1.0     # 指数退避初始等待（秒）
+RECONNECT_MAX       = 30.0    # 指数退避上限（秒）
+RECONNECT_STABLE_S  = 60.0    # 连接稳定判断阈值：稳定超过此秒数后重置计数器
+STATS_INTERVAL      = 60      # 监控统计打印间隔（秒）
+STATE_POLL_INTERVAL = 0.005   # 状态流消费轮询间隔（5ms）
 
 
-def _parse_proxy():
+def _parse_proxy() -> dict:
     """从环境变量读取代理配置（支持 HTTP_PROXY / HTTPS_PROXY）。"""
     raw = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or ""
     if not raw:
@@ -64,290 +82,597 @@ def _parse_proxy():
     }
 
 
+@dataclass
+class _ConnStats:
+    """单个 WS 连接的实时统计计数器。"""
+    msg_count:       int   = 0
+    drop_count:      int   = 0
+    reconnect_count: int   = 0
+    is_connected:    bool  = False   # on_open 回调成功设为 True，断线设为 False
+    _t0:             float = field(default_factory=time.time)
+
+    def msg_per_sec(self) -> float:
+        elapsed = time.time() - self._t0
+        return self.msg_count / elapsed if elapsed > 0 else 0.0
+
+    def reset_rate(self):
+        """重置速率计数器（保留 drop/reconnect 累计值）。"""
+        self.msg_count = 0
+        self._t0 = time.time()
+
+
 class MultiSymbolFeed:
     """
-    Binance Futures Combined Stream 多币订阅客户端。
+    Binance Futures Combined Stream 多币订阅客户端（三通道分片并行版）。
 
-    将 aggTrade 和 bookTicker 推送解析后，
-    分别回调 on_agg_trade 和 on_book_ticker 函数。
+    外部接口：
+        start()                  : 启动所有连接和工作线程
+        stop()                   : 优雅关闭
+        update_depth_symbols(s)  : 更新 depth5 动态订阅集合
+        get_stats()              : 返回监控统计快照
     """
 
     BASE_URL = "wss://fstream.binance.com/stream"
 
     def __init__(
         self,
-        symbols:         List[str],
-        on_agg_trade:    Callable[[dict], None],
-        on_book_ticker:  Callable[[dict], None],
-        on_depth:        Optional[Callable[[dict], None]] = None,
+        symbols:        List[str],
+        on_agg_trade:   Callable[[dict], None],
+        on_book_ticker: Callable[[dict], None],
+        on_depth:       Optional[Callable[[dict], None]] = None,
+        trade_workers:  int = TRADE_WORKERS,
     ):
         """
         参数：
-            symbols        : 要订阅的交易对列表（大小写均可，内部统一转小写）
-            on_agg_trade   : 聚合成交回调，参数格式：
-                             {"symbol": str, "price": float, "qty": float,
-                              "is_buyer_maker": bool, "timestamp": int}
-            on_book_ticker : 最优盘口回调，参数格式：
-                             {"symbol": str, "bid": float, "bid_qty": float,
-                              "ask": float, "ask_qty": float}
-            on_depth       : Top-5 深度快照回调（可选），参数格式：
-                             {"symbol": str, "bids": [[p,q],...], "asks": [[p,q],...],
-                              "mid": float, "ts_ms": int}
-                             来自 @depth5@100ms，每条消息是完整快照（非增量）
+            symbols        : 交易对列表（大小写均可，内部转大写）
+            on_agg_trade   : aggTrade 回调，格式：
+                             {"symbol", "price", "qty", "is_buyer_maker", "timestamp"}
+            on_book_ticker : bookTicker 回调，格式：
+                             {"symbol", "bid", "bid_qty", "ask", "ask_qty"}
+            on_depth       : depth5 回调（可选），格式：
+                             {"symbol", "bids", "asks", "mid", "ts_ms"}
+            trade_workers  : trade 通道分片数（并行工作线程数）
         """
         self.symbols        = [s.upper() for s in symbols]
         self.on_agg_trade   = on_agg_trade
         self.on_book_ticker = on_book_ticker
         self.on_depth       = on_depth
+        self._running       = False
+        self._proxy         = _parse_proxy()
 
-        self._running   = False
-        self._threads:  List[threading.Thread]         = []
-        self._ws_apps:  List[websocket.WebSocketApp]   = []
-        self._ws_lock   = threading.Lock()
-        self._proxy     = _parse_proxy()
-        # depth5 时每连接 3 流/品种，60×3=180 < 200 仍安全
-        self._streams_per_sym = 3 if on_depth else 2
+        # ── 1. trade 通道：N 个分片队列 ──────────────────────────────────────
+        self._n_workers = trade_workers
+        self._trade_queues: List[queue.Queue] = [
+            queue.Queue(maxsize=TRADE_QUEUE_SIZE) for _ in range(self._n_workers)
+        ]
+        # 预计算 symbol → shard 映射（O(1) 路由）
+        self._sym_to_shard: Dict[str, int] = {
+            sym: hash(sym) % self._n_workers for sym in self.symbols
+        }
 
-        # 独立分发队列 + 消费线程：WS 线程只做入队，回调在此线程执行
-        self._msg_queue: queue.Queue = queue.Queue(maxsize=DISPATCH_QUEUE_SIZE)
-        self._dispatch_thread: Optional[threading.Thread] = None
+        # ── 2. book 通道：状态流（latest-only）──────────────────────────────
+        self._book_state: Dict[str, dict] = {}
+        self._book_dirty: Set[str]        = set()
+        self._book_lock   = threading.Lock()
+
+        # ── 3. depth 通道：状态流（latest-only）─────────────────────────────
+        self._depth_state: Dict[str, dict] = {}
+        self._depth_dirty: Set[str]        = set()
+        self._depth_lock   = threading.Lock()
+
+        # ── 4. depth 动态订阅状态 ─────────────────────────────────────────────
+        self._depth_active:   Set[str]                    = set()
+        self._depth_lock_sub  = threading.Lock()
+        self._sym_to_conn:    Dict[str, int]             = {}   # symbol → 连接 index
+        self._conn_ws:        Dict[int, websocket.WebSocketApp] = {}
+        self._ws_lock         = threading.Lock()
+        self._sub_req_id      = 0
+
+        # ── 5. 监控统计 ───────────────────────────────────────────────────────
+        self._conn_stats: Dict[int, _ConnStats] = collections.defaultdict(_ConnStats)
+        self._total_drop              = 0
+        self._sf_book_updates         = 0   # state-flow book 更新次数（60s 窗口）
+        self._sf_depth_updates        = 0   # state-flow depth 更新次数（60s 窗口）
+
+        # ── 后台线程列表 ──────────────────────────────────────────────────────
+        self._threads: List[threading.Thread] = []
 
     # ─── 公开接口 ────────────────────────────────────────────────────────────
 
     def start(self):
-        """启动所有 WebSocket 连接（非阻塞，在后台线程运行）"""
+        """启动所有工作线程和 WS 连接（非阻塞）。"""
         self._running = True
 
-        # 先启动分发消费线程
-        self._dispatch_thread = threading.Thread(
-            target=self._dispatch_loop,
-            daemon=True,
-            name="MultiWS-Dispatch",
-        )
-        self._dispatch_thread.start()
+        # 1. N 个 trade 分片工作线程
+        for i in range(self._n_workers):
+            self._start_thread(self._trade_worker, (i,), f"TradeWorker-{i}")
 
-        symbol_chunks = [
-            self.symbols[i: i + SYMBOLS_PER_CONN]
-            for i in range(0, len(self.symbols), SYMBOLS_PER_CONN)
-        ]
+        # 2. book 状态流消费线程
+        self._start_thread(self._book_consumer, (), "BookConsumer")
 
-        for i, chunk in enumerate(symbol_chunks):
-            t = threading.Thread(
-                target=self._run_connection,
-                args=(chunk, i),
-                daemon=True,
-                name=f"MultiWS-{i}",
-            )
-            t.start()
-            self._threads.append(t)
-            time.sleep(0.5)   # 错开启动，避免同时连接触发限速
+        # 3. depth 状态流消费线程（仅在注册了 on_depth 时启动）
+        if self.on_depth:
+            self._start_thread(self._depth_consumer, (), "DepthConsumer")
 
+        # 4. 监控统计线程
+        self._start_thread(self._stats_loop, (), "WSStats")
+
+        # 5. WS 连接线程（round-robin 均匀打散，而不是连续切块）
+        symbol_chunks = self._build_round_robin_chunks(self.symbols, SYMBOLS_PER_CONN)
+
+        if not symbol_chunks:
+            logger.warning("[MultiWS] symbols 列表为空，未启动任何 WS 连接！请检查交易池过滤结果。")
+
+        # 重建 symbol -> conn 映射
+        self._sym_to_conn.clear()
+        for conn_idx, chunk in enumerate(symbol_chunks):
+            for sym in chunk:
+                self._sym_to_conn[sym] = conn_idx
+
+        # 启动各连接
+        for conn_idx, chunk in enumerate(symbol_chunks):
+            _ = self._conn_stats[conn_idx]  # 预注册 stats
+            self._start_thread(self._run_connection, (chunk, conn_idx), f"MultiWS-{conn_idx}")
+            time.sleep(0.5)   # 错开启动，避免同时握手触发限速
+
+        chunk_sizes = [len(chunk) for chunk in symbol_chunks]
         logger.info(
-            f"[MultiWS] 启动 {len(self._threads)} 个连接，"
-            f"订阅 {len(self.symbols)} 个品种 × {self._streams_per_sym} 种流"
-            + (" (含 depth5@100ms)" if self.on_depth else "")
+            f"[MultiWS] 启动 | "
+            f"品种={len(self.symbols)} | "
+            f"连接数={len(symbol_chunks)} | "
+            f"每连接品种数={chunk_sizes} | "
+            f"trade分片={self._n_workers} | "
+            f"depth=动态（初始 0） | "
+            f"symbol分配=round-robin"
         )
 
     def stop(self):
-        """停止所有 WebSocket 连接"""
+        """优雅关闭所有连接和线程。"""
         self._running = False
-        with self._ws_lock:
-            apps = list(self._ws_apps)
-        for ws in apps:
-            try:
-                ws.close()
-            except Exception:
-                pass
-        # 唤醒分发线程使其退出
-        try:
-            self._msg_queue.put_nowait(None)
-        except queue.Full:
-            pass
-        logger.info("[MultiWS] 所有连接已关闭")
 
-    # ─── 内部实现 ────────────────────────────────────────────────────────────
+        with self._ws_lock:
+            for ws in self._conn_ws.values():
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+        # 向所有 trade 队列发送退出哨兵
+        for q in self._trade_queues:
+            try:
+                q.put_nowait(None)
+            except queue.Full:
+                pass
+
+        logger.info("[MultiWS] 已关闭")
+
+    def update_depth_symbols(self, wanted: Set[str]):
+        """
+        更新 depth5 动态订阅集合（差量更新）。
+
+        调用方：AlphaFactoryStrategy 每轮 _rank_and_trade() 结束后调用：
+            ws_feed.update_depth_symbols(
+                set(long_positions.keys()) |
+                set(short_positions.keys()) |
+                top_long_candidates |
+                top_short_candidates
+            )
+
+        参数：
+            wanted : 需要 depth5 的品种集合（大写），传入空集合则全部取消订阅
+        """
+        if not self.on_depth:
+            return
+
+        wanted_upper = {s.upper() for s in wanted}
+
+        with self._depth_lock_sub:
+            to_add    = wanted_upper - self._depth_active
+            to_remove = self._depth_active - wanted_upper
+
+            for sym in to_add:
+                self._send_sub(sym, subscribe=True)
+
+            for sym in to_remove:
+                self._send_sub(sym, subscribe=False)
+
+            if to_add or to_remove:
+                logger.debug(
+                    f"[MultiWS] depth +{len(to_add)} -{len(to_remove)} "
+                    f"→ 共 {len(wanted_upper)} 个"
+                )
+            self._depth_active = set(wanted_upper)
+
+    def get_stats(self) -> dict:
+        """返回当前监控快照，供外部仪表盘查询。"""
+        with self._depth_lock_sub:
+            n_depth = len(self._depth_active)
+        return {
+            "connections": {
+                idx: {
+                    "msg_per_sec":     round(s.msg_per_sec(), 2),
+                    "drop_count":      s.drop_count,
+                    "reconnect_count": s.reconnect_count,
+                }
+                for idx, s in self._conn_stats.items()
+            },
+            "trade_queue_backlog": [q.qsize() for q in self._trade_queues],
+            "total_drop":          self._total_drop,
+            "depth_active":        n_depth,
+        }
+
+    # ─── 内部工具 ────────────────────────────────────────────────────────────
+
+    def _start_thread(self, target, args, name):
+        t = threading.Thread(target=target, args=args, daemon=True, name=name)
+        t.start()
+        self._threads.append(t)
+
+    def _build_round_robin_chunks(self, symbols: List[str], symbols_per_conn: int) -> List[List[str]]:
+        """
+        按 round-robin 将 symbol 均匀打散到各连接。
+
+        目标：
+            - 保持总连接数 ≈ ceil(len(symbols) / symbols_per_conn)
+            - 不再使用连续切块，避免“前段 symbol 全落到 conn-0”
+            - 让 depth 动态订阅也随 _sym_to_conn 自然均摊
+
+        例子：
+            symbols=[s1,s2,s3,s4,s5,s6], 每连接目标=2
+            连接数=3
+            结果：
+                conn-0: s1,s4
+                conn-1: s2,s5
+                conn-2: s3,s6
+        """
+        if not symbols:
+            return []
+
+        n_conn = max(1, math.ceil(len(symbols) / symbols_per_conn))
+        chunks: List[List[str]] = [[] for _ in range(n_conn)]
+
+        for i, sym in enumerate(symbols):
+            conn_idx = i % n_conn
+            chunks[conn_idx].append(sym)
+
+        return [chunk for chunk in chunks if chunk]
+
+    def _send_sub(self, sym: str, subscribe: bool):
+        """向对应 WS 连接发送 SUBSCRIBE / UNSUBSCRIBE 消息（已持有 _depth_lock_sub）。"""
+        conn_idx = self._sym_to_conn.get(sym)
+        if conn_idx is None:
+            return
+        with self._ws_lock:
+            ws = self._conn_ws.get(conn_idx)
+        if ws is None:
+            return
+        self._sub_req_id += 1
+        method = "SUBSCRIBE" if subscribe else "UNSUBSCRIBE"
+        try:
+            ws.send(json.dumps({
+                "method": method,
+                "params": [f"{sym.lower()}@depth5@100ms"],
+                "id":     self._sub_req_id,
+            }))
+        except Exception as e:
+            logger.debug(f"[MultiWS] {method} {sym} 失败: {e}")
+
+    # ─── WS 连接（指数退避重连）──────────────────────────────────────────────
 
     def _build_url(self, symbols: List[str]) -> str:
-        """
-        构建 Binance Combined Stream URL。
-
-        例（含 depth）：
-            btcusdt@aggTrade/btcusdt@bookTicker/btcusdt@depth5@100ms/...
-        """
+        """构建只含 aggTrade + bookTicker 的 Combined Stream URL。"""
         streams = []
         for sym in symbols:
-            sym_lower = sym.lower()
-            streams.append(f"{sym_lower}@aggTrade")
-            streams.append(f"{sym_lower}@bookTicker")
-            if self.on_depth:
-                streams.append(f"{sym_lower}@depth5@100ms")
+            s = sym.lower()
+            streams.append(f"{s}@aggTrade")
+            streams.append(f"{s}@bookTicker")
         return f"{self.BASE_URL}?streams={'/'.join(streams)}"
-
-    def _on_message(self, ws, raw: str):
-        """
-        WebSocket 消息处理器（仅解析 + 入队，不做业务回调）。
-
-        业务回调在独立的 _dispatch_loop 线程中执行，
-        避免回调耗时阻塞 WS recv 缓冲。
-
-        Binance Combined Stream 的消息格式：
-        {
-            "stream": "btcusdt@aggTrade",
-            "data": { ... }
-        }
-        """
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            return
-
-        stream = msg.get("stream", "")
-        data   = msg.get("data", {})
-        if not stream or not data:
-            return
-
-        try:
-            self._msg_queue.put_nowait((stream, data))
-        except queue.Full:
-            # 队列满时丢弃最旧的一条再入队（保持实时性，牺牲完整性）
-            try:
-                self._msg_queue.get_nowait()
-                self._msg_queue.put_nowait((stream, data))
-            except queue.Empty:
-                pass
-
-    def _dispatch_loop(self):
-        """消息分发消费循环（独立线程，串行执行业务回调）。"""
-        while self._running:
-            try:
-                item = self._msg_queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-            if item is None:   # stop() 发出的退出信号
-                break
-            stream, data = item
-            if "@aggTrade" in stream:
-                self._handle_agg_trade(data)
-            elif "@bookTicker" in stream:
-                self._handle_book_ticker(data)
-            elif "@depth" in stream and self.on_depth:
-                self._handle_depth(data)
-
-    def _handle_agg_trade(self, data: dict):
-        """
-        解析 aggTrade 数据。
-
-        Binance aggTrade 字段：
-            s : symbol
-            p : price (str)
-            q : quantity (str)
-            m : is_buyer_maker (bool)  True=主动卖；False=主动买
-            T : trade_time (ms)
-        """
-        try:
-            self.on_agg_trade({
-                "symbol":          data["s"],
-                "price":           float(data["p"]),
-                "qty":             float(data["q"]),
-                "is_buyer_maker":  bool(data["m"]),
-                "timestamp":       int(data["T"]),
-            })
-        except (KeyError, ValueError) as e:
-            logger.debug(f"[MultiWS] aggTrade 解析错误: {e}")
-
-    def _handle_book_ticker(self, data: dict):
-        """
-        解析 bookTicker 数据。
-
-        Binance bookTicker 字段：
-            s : symbol
-            b : best bid price (str)
-            B : best bid qty (str)
-            a : best ask price (str)
-            A : best ask qty (str)
-        """
-        try:
-            self.on_book_ticker({
-                "symbol":   data["s"],
-                "bid":      float(data["b"]),
-                "bid_qty":  float(data["B"]),
-                "ask":      float(data["a"]),
-                "ask_qty":  float(data["A"]),
-            })
-        except (KeyError, ValueError) as e:
-            logger.debug(f"[MultiWS] bookTicker 解析错误: {e}")
-
-    def _handle_depth(self, data: dict):
-        """
-        解析 @depth5@100ms 快照。
-
-        每条消息是 top-5 bids/asks 的完整快照（非增量），无需维护本地订单簿状态。
-
-        Binance depth5 字段：
-            s : symbol
-            b : [[price, qty], ...] bids（最多5档）
-            a : [[price, qty], ...] asks（最多5档）
-            T : transaction time (ms)
-            E : event time (ms)
-        """
-        try:
-            sym = data.get("s", "")
-            if not sym:
-                return
-            bids_raw = data.get("b", [])
-            asks_raw = data.get("a", [])
-            bids = [[float(p), float(q)] for p, q in bids_raw if float(q) > 0]
-            asks = [[float(p), float(q)] for p, q in asks_raw if float(q) > 0]
-            if not bids or not asks:
-                return
-            mid = (bids[0][0] + asks[0][0]) / 2.0
-            self.on_depth({
-                "symbol": sym,
-                "bids":   bids,
-                "asks":   asks,
-                "mid":    mid,
-                "ts_ms":  int(data.get("T", data.get("E", 0))),
-            })
-        except (KeyError, ValueError, IndexError, TypeError) as e:
-            logger.debug(f"[MultiWS] depth5 解析错误: {e}")
-
-    def _on_error(self, ws, error):
-        logger.error(f"[MultiWS] WebSocket 错误: {error}")
-
-    def _on_close(self, ws, close_status_code, close_msg):
-        logger.warning(f"[MultiWS] 连接关闭 code={close_status_code} msg={close_msg}")
-
-    def _on_open(self, ws):
-        logger.info("[MultiWS] WebSocket 连接已建立")
 
     def _run_connection(self, symbols: List[str], conn_idx: int):
         """
-        运行单个 WebSocket 连接（含自动重连）。
+        单个 WS 连接主循环（含指数退避重连）。
 
-        在独立线程中运行，断线后等待 RECONNECT_DELAY 秒重连。
+        重连策略：
+            delay = min(RECONNECT_BASE × 2^retry, RECONNECT_MAX)
+            连接稳定 ≥ RECONNECT_STABLE_S 秒后，retry 归零
         """
-        url = self._build_url(symbols)
-        logger.info(f"[MultiWS-{conn_idx}] 连接 {len(symbols)} 个品种 ({symbols[:3]}...)")
+        url   = self._build_url(symbols)
+        stats = self._conn_stats[conn_idx]
+        retry = 0
+
+        logger.info(f"[MultiWS-{conn_idx}] 启动 | {len(symbols)} 个品种 ({symbols[:3]}...)")
 
         while self._running:
+            connect_start = time.time()
+
             ws = websocket.WebSocketApp(
                 url,
-                on_message = self._on_message,
-                on_error   = self._on_error,
-                on_close   = self._on_close,
-                on_open    = self._on_open,
+                on_message=lambda _, m: self._on_message(m, conn_idx),
+                on_error=lambda _, e: self._on_error(e, conn_idx),
+                on_close=lambda _, c, m: self._on_close(c, m, conn_idx),
+                on_open=lambda _w: self._on_open(_w, conn_idx),
             )
-            with self._ws_lock:
-                self._ws_apps.append(ws)
             ws.run_forever(
-                ping_interval = 20,   # 每20s发一次ping，代理环境更频繁保活
-                ping_timeout  = 10,   # 10s等不到pong就重连，快速失败
+                ping_interval=30,   # 每 30s 发一次 ping（必须 > ping_timeout）
+                ping_timeout=10,    # 等 pong 最多 10s（interval > timeout，满足库约束）
                 **self._proxy,
             )
-            with self._ws_lock:
-                if ws in self._ws_apps:
-                    self._ws_apps.remove(ws)
 
-            if self._running:
-                logger.info(f"[MultiWS-{conn_idx}] {RECONNECT_DELAY}s 后重连...")
-                time.sleep(RECONNECT_DELAY)
+            # 连接断开，清理 ws 引用
+            with self._ws_lock:
+                if self._conn_ws.get(conn_idx) is ws:
+                    del self._conn_ws[conn_idx]
+
+            if not self._running:
+                break
+
+            # 指数退避：连接稳定一段时间则重置
+            stable = time.time() - connect_start >= RECONNECT_STABLE_S
+            if stable:
+                retry = 0
+            delay = min(RECONNECT_BASE * (2 ** retry), RECONNECT_MAX)
+            retry += 1
+            stats.reconnect_count += 1
+
+            logger.warning(
+                f"[MultiWS-{conn_idx}] 断线 "
+                f"(第 {stats.reconnect_count} 次重连) "
+                f"→ {delay:.1f}s 后重试"
+            )
+            time.sleep(delay)
+
+    def _on_open(self, ws, conn_idx: int):
+        """连接建立：注册 ws 引用，恢复已激活的 depth 订阅。"""
+        with self._ws_lock:
+            self._conn_ws[conn_idx] = ws
+        self._conn_stats[conn_idx].is_connected = True
+
+        # 恢复该连接负责的 depth 订阅（断线重连后需重新订阅）
+        with self._depth_lock_sub:
+            to_restore = {
+                sym for sym in self._depth_active
+                if self._sym_to_conn.get(sym) == conn_idx
+            }
+        for sym in to_restore:
+            with self._depth_lock_sub:
+                self._send_sub(sym, subscribe=True)
+
+        logger.info(
+            f"[MultiWS-{conn_idx}] 已连接"
+            + (f"，恢复 {len(to_restore)} 个 depth 订阅" if to_restore else "")
+        )
+
+    def _on_error(self, error, conn_idx: int):
+        logger.error(f"[MultiWS-{conn_idx}] 错误: {error}")
+
+    def _on_close(self, close_status_code, close_msg, conn_idx: int):
+        self._conn_stats[conn_idx].is_connected = False
+        logger.warning(
+            f"[MultiWS-{conn_idx}] 关闭 "
+            f"code={close_status_code} msg={close_msg}"
+        )
+
+    # ─── 消息分流（WS 线程，极低延迟）──────────────────────────────────────────
+
+    def _on_message(self, raw: str, conn_idx: int):
+        """
+        WS 消息接收器（运行在 WS 线程）。
+
+        只做：JSON 解析 + 分流到三通道
+        不做任何业务计算，确保 WS recv 缓冲不积压。
+
+        Binance Combined Stream 消息格式：
+            {"stream": "btcusdt@aggTrade", "data": {...}}
+        """
+        try:
+            msg = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        stream = msg.get("stream", "")
+        data   = msg.get("data")
+        if not stream or data is None:
+            return
+
+        stats = self._conn_stats[conn_idx]
+        stats.msg_count += 1
+
+        if "@aggTrade" in stream:
+            self._route_trade(data, stats)
+        elif "@bookTicker" in stream:
+            self._route_book(data)
+        elif "@depth" in stream:
+            self._route_depth(data)
+
+    def _route_trade(self, data: dict, stats: _ConnStats):
+        """
+        trade 消息 → 按 symbol hash 分片入队（事件流，不覆盖）。
+
+        优先级最高：队列满时丢最旧的一条，而不是丢当前消息。
+        """
+        sym = data.get("s", "")
+        if not sym:
+            return
+        shard = self._sym_to_shard.get(sym, hash(sym) % self._n_workers)
+        q = self._trade_queues[shard]
+        try:
+            q.put_nowait(data)
+        except queue.Full:
+            # 丢最旧 → 保证实时性
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                pass
+            stats.drop_count += 1
+            self._total_drop += 1
+
+    def _route_book(self, data: dict):
+        """
+        book 消息 → 覆盖最新值（state-flow）。
+
+        不入队，直接覆盖 _book_state[sym]，消费线程轮询 dirty 集合处理。
+        天然无积压：不论推送多快，消费侧始终看到最新值。
+        """
+        sym = data.get("s", "")
+        if not sym:
+            return
+        with self._book_lock:
+            self._book_state[sym] = data
+            self._book_dirty.add(sym)
+        self._sf_book_updates += 1
+
+    def _route_depth(self, data: dict):
+        """
+        depth 消息 → 覆盖最新值（state-flow）。
+
+        优先级最低：state-flow 天然无积压，无需额外丢弃逻辑。
+        """
+        sym = data.get("s", "")
+        if not sym:
+            return
+        with self._depth_lock:
+            self._depth_state[sym] = data
+            self._depth_dirty.add(sym)
+        self._sf_depth_updates += 1
+
+    # ─── 工作线程 ────────────────────────────────────────────────────────────
+
+    def _trade_worker(self, shard_id: int):
+        """
+        trade 分片工作线程。
+
+        从对应 shard 队列消费，调用 on_agg_trade 回调。
+        同 symbol 的消息在同一 shard，保证 symbol 级有序。
+        不同 shard 的 symbol 并行处理。
+        """
+        q = self._trade_queues[shard_id]
+        while self._running:
+            try:
+                data = q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if data is None:   # 退出哨兵
+                break
+            try:
+                self.on_agg_trade({
+                    "symbol":         data["s"],
+                    "price":          float(data["p"]),
+                    "qty":            float(data["q"]),
+                    "is_buyer_maker": bool(data["m"]),
+                    "timestamp":      int(data["T"]),
+                })
+            except (KeyError, ValueError, TypeError) as e:
+                logger.debug(f"[TradeWorker-{shard_id}] 解析错误: {e}")
+
+    def _book_consumer(self):
+        """
+        book 状态流消费线程。
+
+        每 5ms 轮询 dirty 集合，对每个有更新的 symbol 调用 on_book_ticker。
+        拍摄快照后立即清空 dirty，避免持锁时间过长。
+        """
+        while self._running:
+            time.sleep(STATE_POLL_INTERVAL)
+            with self._book_lock:
+                if not self._book_dirty:
+                    continue
+                dirty    = list(self._book_dirty)
+                self._book_dirty.clear()
+                snapshot = {sym: self._book_state[sym] for sym in dirty if sym in self._book_state}
+
+            for sym, data in snapshot.items():
+                try:
+                    self.on_book_ticker({
+                        "symbol":  sym,
+                        "bid":     float(data["b"]),
+                        "bid_qty": float(data["B"]),
+                        "ask":     float(data["a"]),
+                        "ask_qty": float(data["A"]),
+                    })
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.debug(f"[BookConsumer] {sym} 解析错误: {e}")
+
+    def _depth_consumer(self):
+        """
+        depth 状态流消费线程。
+
+        每 5ms 轮询 dirty 集合，对每个有更新的 symbol 调用 on_depth。
+        """
+        while self._running:
+            time.sleep(STATE_POLL_INTERVAL)
+            with self._depth_lock:
+                if not self._depth_dirty:
+                    continue
+                dirty    = list(self._depth_dirty)
+                self._depth_dirty.clear()
+                snapshot = {sym: self._depth_state[sym] for sym in dirty if sym in self._depth_state}
+
+            for sym, data in snapshot.items():
+                try:
+                    bids_raw = data.get("b", [])
+                    asks_raw = data.get("a", [])
+                    bids = [[float(p), float(q)] for p, q in bids_raw if float(q) > 0]
+                    asks = [[float(p), float(q)] for p, q in asks_raw if float(q) > 0]
+                    if not bids or not asks:
+                        continue
+                    mid = (bids[0][0] + asks[0][0]) / 2.0
+                    self.on_depth({
+                        "symbol": sym,
+                        "bids":   bids,
+                        "asks":   asks,
+                        "mid":    mid,
+                        "ts_ms":  int(data.get("T", data.get("E", 0))),
+                    })
+                except (KeyError, ValueError, IndexError, TypeError) as e:
+                    logger.debug(f"[DepthConsumer] {sym} 解析错误: {e}")
+
+    # ─── 监控统计 ─────────────────────────────────────────────────────────────
+
+    def _stats_loop(self):
+        """监控统计打印线程（每 60s 打印一次）。"""
+        while self._running:
+            time.sleep(STATS_INTERVAL)
+            if not self._running:
+                break
+            self._print_stats()
+
+    def _print_stats(self):
+        sep = "-" * 62
+        logger.info(sep)
+        logger.info(f"[MultiWS Stats] {time.strftime('%H:%M:%S')}")
+
+        # 各连接 msg/s、drop、reconnect、连接状态
+        for conn_idx, stats in sorted(self._conn_stats.items()):
+            status = "✓ UP" if stats.is_connected else "✗ DOWN"
+            logger.info(
+                f"  conn-{conn_idx}:  "
+                f"[{status}]  "
+                f"msg/s={stats.msg_per_sec():>7.1f}  "
+                f"drops={stats.drop_count:>5}  "
+                f"reconnects={stats.reconnect_count}"
+            )
+            stats.reset_rate()
+
+        # trade 队列积压
+        backlogs = [q.qsize() for q in self._trade_queues]
+        logger.info(
+            f"  trade_q backlog : {backlogs}  "
+            f"total_drop={self._total_drop}"
+        )
+
+        # 状态流更新速率（60s 窗口内）
+        with self._depth_lock_sub:
+            n_depth = len(self._depth_active)
+        logger.info(
+            f"  state-flow/60s  : book={self._sf_book_updates}  "
+            f"depth={self._sf_depth_updates}"
+        )
+        logger.info(f"  depth 订阅数    : {n_depth} 个")
+
+        self._sf_book_updates  = 0
+        self._sf_depth_updates = 0
+        logger.info(sep)

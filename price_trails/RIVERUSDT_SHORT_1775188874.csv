@@ -1,0 +1,4 @@
+# symbol=RIVERUSDT,side=SHORT,entry_price=11.447,exit_price=11.447,exit_reason=strategy_stop,sl_price=11.675939999999999,tp_price=11.275295,leverage=10
+ts,seconds,price,ret_margin_pct
+1775188874.003,0.0,11.447,0.0
+1775188874.023,0.0,11.447,0.0

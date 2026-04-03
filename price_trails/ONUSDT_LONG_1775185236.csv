@@ -1,0 +1,5 @@
+# symbol=ONUSDT,side=LONG,entry_price=0.08404,exit_price=0.08386,exit_reason=vol_stop,sl_price=0.08387192,tp_price=0.08530059999999999,leverage=10
+ts,seconds,price,ret_margin_pct
+1775185236.317,0.0,0.08404,0.0
+1775185237.996,1.7,0.08397,-0.8329
+1775185238.471,2.2,0.08386,-2.1418

@@ -1,0 +1,4 @@
+# symbol=ONGUSDT,side=LONG,entry_price=0.09101,exit_price=0.09037,exit_reason=dynamic_vol_stop,sl_price=0.08991787999999999,tp_price=0.09237514999999999,leverage=10
+ts,seconds,price,ret_margin_pct
+1775198989.2,0.0,0.09101,0.0
+1775198989.691,0.5,0.09037,-7.0322
