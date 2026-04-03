@@ -253,7 +253,6 @@ class AlphaFactoryStrategy(StrategyBase):
 
         # 数据导出：初始化文件路径
         _dir = self.params["export_dir"]
-        self._factor_log_path    = os.path.join(_dir, "factor_log.csv")
         self._ic_log_path        = os.path.join(_dir, "ic_log.csv")
         self._positions_json_path = os.path.join(_dir, "positions_current.json")
         self._trail_dir          = os.path.join(_dir, "price_trails")
@@ -931,28 +930,6 @@ class AlphaFactoryStrategy(StrategyBase):
         return kept
 
     # ─── 数据导出 ─────────────────────────────────────────────────────────────
-
-    def _export_trade_factors(self, record: "TradeRecord"):
-        """每笔平仓后追加因子记录到 factor_log.csv（供 Dashboard 使用）"""
-        if not self.params["export_data"] or not record.factors:
-            return
-        try:
-            rows = [
-                [record.exit_time, record.symbol, record.side,
-                 fname,
-                 fval if record.side == "LONG" else -fval,
-                 record.ret_lev_pct]
-                for fname, fval in record.factors.items()
-                if fname != "total" and not fname.endswith("_contrib")
-            ]
-            write_header = not os.path.exists(self._factor_log_path)
-            with open(self._factor_log_path, "a", newline="") as f:
-                w = csv.writer(f)
-                if write_header:
-                    w.writerow(["time", "symbol", "side", "factor", "value", "ret"])
-                w.writerows(rows)
-        except Exception as e:
-            logger.debug(f"[AlphaFactory] factor_log 写入失败: {e}")
 
     def _save_price_trail(self, symbol: str, exit_price: float, reason: str):
         """平仓时将价格轨迹写入 CSV 文件（供 view_price_trail.py 可视化）"""
@@ -1662,7 +1639,7 @@ class AlphaFactoryStrategy(StrategyBase):
         if symbol not in self._symbol_stats:
             self._symbol_stats[symbol] = deque(maxlen=self.params["port_stats_window"])
         self._symbol_stats[symbol].append(ret_lev * 100)
-        self._export_trade_factors(record)
+
         self._save_price_trail(symbol, exit_price, reason)
         if self._db:
             self._db.save_completed_trade(record)
@@ -1738,7 +1715,7 @@ class AlphaFactoryStrategy(StrategyBase):
         if symbol not in self._symbol_stats:
             self._symbol_stats[symbol] = deque(maxlen=self.params["port_stats_window"])
         self._symbol_stats[symbol].append(ret_lev * 100)
-        self._export_trade_factors(record)
+
         self._save_price_trail(symbol, exit_price, reason)
         if self._db:
             self._db.save_completed_trade(record)
@@ -1890,7 +1867,7 @@ class AlphaFactoryStrategy(StrategyBase):
         if symbol not in self._symbol_stats:
             self._symbol_stats[symbol] = deque(maxlen=self.params["port_stats_window"])
         self._symbol_stats[symbol].append(ret_lev * 100)
-        self._export_trade_factors(record)
+
         if self._db:
             self._db.save_completed_trade(record)
 
