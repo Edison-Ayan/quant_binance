@@ -1,8 +1,0 @@
-ts,secs_from_entry,event_type,price,lc_state,aligned_score,velocity,cur_ret,peak_pnl,drawdown,exit_reason,extra
-1775194297.606,0.0,entry,0.03681,,0.0,0.0,0.0,0.0,0.0,,score=+2.722 vol=0.2000%
-1775194298.178,0.6,trailing_armed,0.03696,BUILD,0.0,0.0,0.00407,0.0,0.0,,
-1775194331.8,34.2,rank_snapshot,0.03742,EXPANSION,2.8185,0.02414,0.0,0.0,0.0,,unified=+2.818 held=34s
-1775194331.8,34.2,lifecycle_change,0.03742,EXPANSION,2.8185,0.02414,0.01657,0.0,0.0,,BUILD->EXPANSION
-1775194392.985,95.4,rank_snapshot,0.03733,EXPANSION,2.312,-0.1085,0.0,0.0,0.0,,unified=+2.312 held=95s
-1775194417.685,120.1,trailing_hit,0.03727,EXPANSION,0.0,0.0,0.0125,0.0,0.02816,,thresh=0.1000%
-1775194418.153,120.5,exit,0.03727,EXPANSION,2.312,-0.1085,0.0125,0.0,0.02816,trailing_expansion,

@@ -1,3 +1,0 @@
-ts,secs_from_entry,event_type,price,lc_state,aligned_score,velocity,cur_ret,peak_pnl,drawdown,exit_reason,extra
-1775185265.904,0.0,entry,0.1164,,0.0,0.0,0.0,0.0,0.0,,score=+1.792 vol=0.2000%
-1775185299.032,33.1,exit,0.1161,BUILD,1.7919,0.0,-0.00258,0.0,0.00258,vol_stop,

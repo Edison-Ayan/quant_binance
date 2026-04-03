@@ -23,6 +23,7 @@ import csv
 import os
 import time
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -126,18 +127,21 @@ class TradeRecorder:
     ]
 
     def __init__(self, export_dir: str = ".", reset: bool = False):
-        self._dir       = export_dir
-        self._trail_dir = os.path.join(export_dir, "trades")
+        self._dir = export_dir
+
+        # 每次启动生成唯一 session 标签，所有输出文件按此隔离
+        session = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._trail_dir = os.path.join(export_dir, "trades", session)
         os.makedirs(self._trail_dir, exist_ok=True)
 
         self._journals: Dict[str, TradeJournal] = {}  # trade_id → journal
         # symbol+side → trade_id（方便策略层按持仓 key 查询）
         self._active: Dict[tuple, str] = {}
 
-        # 全局表路径
-        self._trades_path = os.path.join(export_dir, "trades.csv")
-        self._lc_path     = os.path.join(export_dir, "lifecycle_events.csv")
-        self._exit_path   = os.path.join(export_dir, "exit_log.csv")
+        # 全局表路径（带 session 时间戳，每次运行独立文件）
+        self._trades_path = os.path.join(export_dir, f"trades_{session}.csv")
+        self._lc_path     = os.path.join(export_dir, f"lifecycle_events_{session}.csv")
+        self._exit_path   = os.path.join(export_dir, f"exit_log_{session}.csv")
 
         # reset=True：强制清空三张全局表（每次启动重新开始）
         # reset=False：文件存在则追加，不存在才写表头
